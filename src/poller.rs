@@ -697,6 +697,10 @@ fn read_first_codex_tokens() -> Option<CodexTokens> {
         return Some(tokens);
     }
 
+    if let Some(tokens) = read_wsl_unc_codex_tokens() {
+        return Some(tokens);
+    }
+
     for distro in list_wsl_distros() {
         if let Some(tokens) = read_wsl_codex_tokens(&distro) {
             return Some(tokens);
@@ -743,6 +747,46 @@ fn read_windows_codex_tokens() -> Option<CodexTokens> {
         }
     };
     parse_codex_tokens(&content)
+}
+
+fn read_wsl_unc_codex_tokens() -> Option<CodexTokens> {
+    for distro in list_wsl_distros() {
+        let users_root = PathBuf::from(format!(r"\\wsl$\{distro}\home"));
+        let users = match std::fs::read_dir(&users_root) {
+            Ok(users) => users,
+            Err(error) => {
+                diagnose::log_error(
+                    &format!("unable to read WSL users via {}", users_root.display()),
+                    error,
+                );
+                continue;
+            }
+        };
+
+        for user in users.flatten() {
+            let Ok(file_type) = user.file_type() else {
+                continue;
+            };
+            if !file_type.is_dir() {
+                continue;
+            }
+
+            let path = user.path().join(".codex").join("auth.json");
+            let Ok(content) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+
+            if let Some(tokens) = parse_codex_tokens(&content) {
+                diagnose::log(format!(
+                    "read Codex credentials via WSL UNC path {}",
+                    path.display()
+                ));
+                return Some(tokens);
+            }
+        }
+    }
+
+    None
 }
 
 fn read_credentials_from_source(source: &CredentialSource) -> Option<Credentials> {
