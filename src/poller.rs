@@ -95,6 +95,10 @@ pub fn poll() -> Result<UsageData, PollError> {
 }
 
 pub fn poll_codex() -> Result<UsageData, PollError> {
+    if let Ok(data) = fetch_wsl_codex_usage() {
+        return Ok(data);
+    }
+
     let tokens = match read_first_codex_tokens() {
         Some(tokens) => tokens,
         None => {
@@ -584,6 +588,10 @@ fn try_codex_usage_endpoint(
     };
 
     let response: CodexUsageResponse = resp.into_json().map_err(|_| PollError::RequestFailed)?;
+    codex_usage_response_to_data(response)
+}
+
+fn codex_usage_response_to_data(response: CodexUsageResponse) -> Result<UsageData, PollError> {
     let mut data = UsageData::default();
     let rate_limit = response.rate_limit.ok_or(PollError::RequestFailed)?;
 
@@ -598,6 +606,70 @@ fn try_codex_usage_endpoint(
     }
 
     Ok(data)
+}
+
+fn fetch_wsl_codex_usage() -> Result<UsageData, PollError> {
+    for distro in list_wsl_distros() {
+        let Some(data) = fetch_wsl_codex_usage_for_distro(&distro) else {
+            continue;
+        };
+        diagnose::log(format!("read Codex usage via WSL Python in distro {distro}"));
+        return Ok(data);
+    }
+
+    Err(PollError::RequestFailed)
+}
+
+fn fetch_wsl_codex_usage_for_distro(distro: &str) -> Option<UsageData> {
+    let script = r#"
+import json
+import pathlib
+import urllib.request
+
+auth = json.loads((pathlib.Path.home() / ".codex" / "auth.json").read_text())
+tokens = auth.get("tokens") or {}
+access_token = tokens.get("access_token")
+if not access_token:
+    raise SystemExit(2)
+
+headers = {
+    "Authorization": "Bearer " + access_token,
+    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0",
+    "Accept": "application/json",
+}
+account_id = tokens.get("account_id")
+if account_id:
+    headers["chatgpt-account-id"] = account_id
+
+req = urllib.request.Request("https://chatgpt.com/backend-api/codex/usage", headers=headers)
+with urllib.request.urlopen(req, timeout=15) as resp:
+    print(resp.read().decode("utf-8"))
+"#;
+
+    let output = run_with_timeout(
+        Command::new("wsl.exe")
+            .arg("-d")
+            .arg(distro)
+            .arg("--")
+            .arg("python3")
+            .arg("-c")
+            .arg(script)
+            .creation_flags(CREATE_NO_WINDOW)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null()),
+        Duration::from_secs(20),
+    )?;
+
+    if !output.status.success() {
+        diagnose::log(format!(
+            "WSL Codex usage fetch failed for distro {distro} with status {}",
+            output.status
+        ));
+        return None;
+    }
+
+    let response: CodexUsageResponse = serde_json::from_slice(&output.stdout).ok()?;
+    codex_usage_response_to_data(response).ok()
 }
 
 fn refresh_codex_access_token(tokens: &CodexTokens) -> Result<String, PollError> {
