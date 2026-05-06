@@ -562,7 +562,7 @@ fn try_codex_usage_endpoint(
         .set("Accept", "application/json")
         .set(
             "User-Agent",
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) CodexUsageMonitor",
+            "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0",
         );
 
     if let Some(account_id) = account_id.filter(|value| !value.is_empty()) {
