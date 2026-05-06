@@ -1,6 +1,6 @@
 [package]
 name = "codex-claude-windows-taskbar"
-version = "1.3.9"
+version = "0.1.0"
 edition = "2021"
 license = "MIT"
 description = "Codex and Claude usage monitor for the Windows taskbar"
