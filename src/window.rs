@@ -59,8 +59,13 @@ struct AppState {
     session_text: String,
     weekly_percent: f64,
     weekly_text: String,
+    codex_session_percent: f64,
+    codex_session_text: String,
+    codex_weekly_percent: f64,
+    codex_weekly_text: String,
 
     data: Option<UsageData>,
+    codex_data: Option<UsageData>,
 
     poll_interval_ms: u32,
     retry_count: u32,
@@ -185,7 +190,7 @@ fn lock_state() -> MutexGuard<'static, Option<AppState>> {
 fn settings_path() -> PathBuf {
     let appdata = std::env::var("APPDATA").unwrap_or_else(|_| ".".to_string());
     PathBuf::from(appdata)
-        .join("ClaudeCodeUsageMonitor")
+        .join("CodexClaudeWindowsTaskbar")
         .join("settings.json")
 }
 
@@ -260,10 +265,13 @@ fn tray_icon_data_from_state() -> (Option<f64>, String) {
     let state = lock_state();
     match state.as_ref() {
         Some(s) if s.last_poll_ok => {
-            let tooltip = format!("5h: {} | 7d: {}", s.session_text, s.weekly_text);
-            (Some(s.session_percent), tooltip)
+            let tooltip = format!(
+                "Codex 5h: {} | 7d: {} | Claude 5h: {} | 7d: {}",
+                s.codex_session_text, s.codex_weekly_text, s.session_text, s.weekly_text
+            );
+            (Some(s.session_percent.max(s.codex_session_percent)), tooltip)
         }
-        _ => (None, "Claude Code Usage Monitor".to_string()),
+        _ => (None, "Codex-Claude-Windows-Taskbar".to_string()),
     }
 }
 
@@ -338,17 +346,25 @@ fn refresh_usage_texts(state: &mut AppState) {
     }
 
     let strings = state.language.strings();
-    let Some((session_text, weekly_text)) = state.data.as_ref().map(|data| {
+    if let Some((session_text, weekly_text)) = state.data.as_ref().map(|data| {
         (
             poller::format_line(&data.session, strings),
             poller::format_line(&data.weekly, strings),
         )
-    }) else {
-        return;
-    };
+    }) {
+        state.session_text = session_text;
+        state.weekly_text = weekly_text;
+    }
 
-    state.session_text = session_text;
-    state.weekly_text = weekly_text;
+    if let Some((session_text, weekly_text)) = state.codex_data.as_ref().map(|data| {
+        (
+            poller::format_line(&data.session, strings),
+            poller::format_line(&data.weekly, strings),
+        )
+    }) {
+        state.codex_session_text = session_text;
+        state.codex_weekly_text = weekly_text;
+    }
 }
 
 fn set_window_title(hwnd: HWND, strings: Strings) {
@@ -607,7 +623,7 @@ fn begin_winget_update(hwnd: HWND) {
 }
 
 const STARTUP_REGISTRY_PATH: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
-const STARTUP_REGISTRY_KEY: &str = "ClaudeCodeUsageMonitor";
+const STARTUP_REGISTRY_KEY: &str = "CodexClaudeWindowsTaskbar";
 
 /// Returns true only if the startup registry value points to this executable.
 fn is_startup_enabled() -> bool {
@@ -724,7 +740,8 @@ fn set_startup_enabled(enable: bool) {
 const SEGMENT_W: i32 = 10;
 const SEGMENT_H: i32 = 13;
 const SEGMENT_GAP: i32 = 1;
-const SEGMENT_COUNT: i32 = 10;
+const PROVIDER_SEGMENT_COUNT: i32 = 5;
+const PROVIDER_BAR_GAP: i32 = 6;
 const CORNER_RADIUS: i32 = 2;
 
 const LEFT_DIVIDER_W: i32 = 3;
@@ -732,7 +749,7 @@ const DIVIDER_RIGHT_MARGIN: i32 = 10;
 const LABEL_WIDTH: i32 = 18;
 const LABEL_RIGHT_MARGIN: i32 = 10;
 const BAR_RIGHT_MARGIN: i32 = 4;
-const TEXT_WIDTH: i32 = 62;
+const TEXT_WIDTH: i32 = 74;
 const RIGHT_MARGIN: i32 = 1;
 const WIDGET_HEIGHT: i32 = 46;
 
@@ -741,11 +758,15 @@ fn total_widget_width() -> i32 {
         + sc(DIVIDER_RIGHT_MARGIN)
         + sc(LABEL_WIDTH)
         + sc(LABEL_RIGHT_MARGIN)
-        + (sc(SEGMENT_W) + sc(SEGMENT_GAP)) * SEGMENT_COUNT
-        - sc(SEGMENT_GAP)
+        + provider_bar_width() * 2
+        + sc(PROVIDER_BAR_GAP)
         + sc(BAR_RIGHT_MARGIN)
         + sc(TEXT_WIDTH)
         + sc(RIGHT_MARGIN)
+}
+
+fn provider_bar_width() -> i32 {
+    (sc(SEGMENT_W) + sc(SEGMENT_GAP)) * PROVIDER_SEGMENT_COUNT - sc(SEGMENT_GAP)
 }
 
 pub fn run() {
@@ -757,7 +778,7 @@ pub fn run() {
     diagnose::log("window::run started");
 
     // Single-instance guard: silently exit if another instance is running
-    let mutex_name = native_interop::wide_str("Global\\ClaudeCodeUsageMonitor");
+    let mutex_name = native_interop::wide_str("Global\\CodexClaudeWindowsTaskbar");
     let _mutex = unsafe {
         let handle = CreateMutexW(None, false, PCWSTR::from_raw(mutex_name.as_ptr()));
         match handle {
@@ -775,7 +796,7 @@ pub fn run() {
         }
     };
 
-    let class_name = native_interop::wide_str("ClaudeCodeUsageMonitor");
+    let class_name = native_interop::wide_str("CodexClaudeWindowsTaskbar");
 
     unsafe {
         let hinstance = GetModuleHandleW(PCWSTR::null()).unwrap();
@@ -860,7 +881,12 @@ pub fn run() {
                 session_text: "--".to_string(),
                 weekly_percent: 0.0,
                 weekly_text: "--".to_string(),
+                codex_session_percent: 0.0,
+                codex_session_text: "--".to_string(),
+                codex_weekly_percent: 0.0,
+                codex_weekly_text: "--".to_string(),
                 data: None,
+                codex_data: None,
                 poll_interval_ms: settings.poll_interval_ms,
                 retry_count: 0,
                 force_notify_auth_error: false,
@@ -985,7 +1011,20 @@ pub fn run() {
 /// ClearType sub-pixel font rendering can be used for crisp, OS-native text.
 fn render_layered() {
     refresh_dpi();
-    let (hwnd_val, is_dark, embedded, strings, session_pct, session_text, weekly_pct, weekly_text) = {
+    let (
+        hwnd_val,
+        is_dark,
+        embedded,
+        strings,
+        session_pct,
+        session_text,
+        weekly_pct,
+        weekly_text,
+        codex_session_pct,
+        codex_session_text,
+        codex_weekly_pct,
+        codex_weekly_text,
+    ) = {
         let state = lock_state();
         match state.as_ref() {
             Some(s) => (
@@ -997,6 +1036,10 @@ fn render_layered() {
                 s.session_text.clone(),
                 s.weekly_percent,
                 s.weekly_text.clone(),
+                s.codex_session_percent,
+                s.codex_session_text.clone(),
+                s.codex_weekly_percent,
+                s.codex_weekly_text.clone(),
             ),
             None => return,
         }
@@ -1015,7 +1058,8 @@ fn render_layered() {
     let width = total_widget_width();
     let height = sc(WIDGET_HEIGHT);
 
-    let accent = Color::from_hex("#D97757");
+    let claude_accent = Color::from_hex("#D97757");
+    let codex_accent = Color::from_hex("#3BAFDA");
     let track = if is_dark {
         Color::from_hex("#444444")
     } else {
@@ -1072,11 +1116,16 @@ fn render_layered() {
             is_dark,
             &bg_color,
             &text_color,
-            &accent,
+            &codex_accent,
+            &claude_accent,
             &track,
             strings,
+            codex_session_pct,
+            &codex_session_text,
             session_pct,
             &session_text,
+            codex_weekly_pct,
+            &codex_weekly_text,
             weekly_pct,
             &weekly_text,
         );
@@ -1135,11 +1184,16 @@ fn paint_content(
     is_dark: bool,
     bg: &Color,
     text_color: &Color,
-    accent: &Color,
+    codex_accent: &Color,
+    claude_accent: &Color,
     track: &Color,
     strings: Strings,
+    codex_session_pct: f64,
+    codex_session_text: &str,
     session_pct: f64,
     session_text: &str,
+    codex_weekly_pct: f64,
+    codex_weekly_text: &str,
     weekly_pct: f64,
     weekly_text: &str,
 ) {
@@ -1223,9 +1277,12 @@ fn paint_content(
             content_x,
             row1_y,
             strings.session_window,
+            codex_session_pct,
+            codex_session_text,
             session_pct,
             session_text,
-            accent,
+            codex_accent,
+            claude_accent,
             track,
         );
         draw_row(
@@ -1233,9 +1290,12 @@ fn paint_content(
             content_x,
             row2_y,
             strings.weekly_window,
+            codex_weekly_pct,
+            codex_weekly_text,
             weekly_pct,
             weekly_text,
-            accent,
+            codex_accent,
+            claude_accent,
             track,
         );
 
@@ -1246,20 +1306,53 @@ fn paint_content(
 
 fn do_poll(send_hwnd: SendHwnd) {
     let hwnd = send_hwnd.to_hwnd();
-    match poller::poll() {
-        Ok(data) => {
+    let claude_result = poller::poll();
+    let codex_result = poller::poll_codex();
+
+    if claude_result.is_ok() || codex_result.is_ok() {
+        {
             let mut state = lock_state();
             if let Some(s) = state.as_mut() {
-                s.session_percent = data.session.percentage;
-                s.weekly_percent = data.weekly.percentage;
-                // Stop fast-poll if reset data is now fresh
-                if !poller::is_past_reset(&data) {
+                let mut any_past_reset = false;
+
+                match claude_result {
+                    Ok(data) => {
+                        s.session_percent = data.session.percentage;
+                        s.weekly_percent = data.weekly.percentage;
+                        any_past_reset |= poller::is_past_reset(&data);
+                        s.data = Some(data);
+                    }
+                    Err(_) if s.data.is_none() => {
+                        s.session_percent = 0.0;
+                        s.weekly_percent = 0.0;
+                        s.session_text = "--".to_string();
+                        s.weekly_text = "--".to_string();
+                    }
+                    Err(_) => {}
+                }
+
+                match codex_result {
+                    Ok(data) => {
+                        s.codex_session_percent = data.session.percentage;
+                        s.codex_weekly_percent = data.weekly.percentage;
+                        any_past_reset |= poller::is_past_reset(&data);
+                        s.codex_data = Some(data);
+                    }
+                    Err(_) if s.codex_data.is_none() => {
+                        s.codex_session_percent = 0.0;
+                        s.codex_weekly_percent = 0.0;
+                        s.codex_session_text = "--".to_string();
+                        s.codex_weekly_text = "--".to_string();
+                    }
+                    Err(_) => {}
+                }
+
+                if !any_past_reset {
                     unsafe {
                         let _ = KillTimer(hwnd, TIMER_RESET_POLL);
                     }
                 }
 
-                s.data = Some(data);
                 s.last_poll_ok = true;
                 refresh_usage_texts(s);
 
@@ -1276,88 +1369,96 @@ fn do_poll(send_hwnd: SendHwnd) {
                 s.auth_watch_mode = poller::CredentialWatchMode::ActiveSource;
                 s.auth_watch_snapshot.clear();
             }
-
-            unsafe {
-                let _ = PostMessageW(hwnd, WM_APP_USAGE_UPDATED, WPARAM(0), LPARAM(0));
-            }
         }
-        Err(e) => {
-            let auth_watch = match e {
-                poller::PollError::AuthRequired | poller::PollError::TokenExpired => Some((
-                    poller::CredentialWatchMode::ActiveSource,
-                    poller::credential_watch_snapshot(poller::CredentialWatchMode::ActiveSource),
-                )),
-                poller::PollError::NoCredentials => Some((
-                    poller::CredentialWatchMode::AllSources,
-                    poller::credential_watch_snapshot(poller::CredentialWatchMode::AllSources),
-                )),
-                poller::PollError::RequestFailed => None,
-            };
-            // Distinguish auth-required errors from transient errors.
-            let notify_auth_error = {
-                let mut state = lock_state();
-                let mut should_notify = false;
-                if let Some(s) = state.as_mut() {
-                    s.last_poll_ok = false;
-                    match auth_watch {
-                        Some((watch_mode, watch_snapshot)) => {
-                            // Only show the balloon on the first failure so it doesn't spam.
-                            if s.retry_count == 0 || s.force_notify_auth_error {
-                                should_notify = true;
-                            }
-                            s.force_notify_auth_error = false;
-                            s.auth_error_paused_polling = true;
-                            s.auth_watch_mode = watch_mode;
-                            s.auth_watch_snapshot = watch_snapshot;
-                            s.session_text = "⚠".to_string();
-                            s.weekly_text = "⚠".to_string();
-                            s.retry_count = s.retry_count.saturating_add(1);
-                            unsafe {
-                                let _ = KillTimer(hwnd, TIMER_POLL);
-                                let _ = KillTimer(hwnd, TIMER_RESET_POLL);
-                                let _ = KillTimer(hwnd, TIMER_COUNTDOWN);
-                                SetTimer(hwnd, TIMER_POLL, s.poll_interval_ms, None);
-                            }
+
+        unsafe {
+            let _ = PostMessageW(hwnd, WM_APP_USAGE_UPDATED, WPARAM(0), LPARAM(0));
+        }
+    } else {
+        let e = match claude_result {
+            Err(e) => e,
+            Ok(_) => poller::PollError::RequestFailed,
+        };
+
+        let auth_watch = match e {
+            poller::PollError::AuthRequired | poller::PollError::TokenExpired => Some((
+                poller::CredentialWatchMode::ActiveSource,
+                poller::credential_watch_snapshot(poller::CredentialWatchMode::ActiveSource),
+            )),
+            poller::PollError::NoCredentials => Some((
+                poller::CredentialWatchMode::AllSources,
+                poller::credential_watch_snapshot(poller::CredentialWatchMode::AllSources),
+            )),
+            poller::PollError::RequestFailed => None,
+        };
+
+        // Distinguish auth-required errors from transient errors.
+        let notify_auth_error = {
+            let mut state = lock_state();
+            let mut should_notify = false;
+            if let Some(s) = state.as_mut() {
+                s.last_poll_ok = false;
+                match auth_watch {
+                    Some((watch_mode, watch_snapshot)) => {
+                        // Only show the balloon on the first failure so it doesn't spam.
+                        if s.retry_count == 0 || s.force_notify_auth_error {
+                            should_notify = true;
                         }
-                        _ => {
-                            // Transient network / credential-missing errors: exponential backoff.
-                            s.force_notify_auth_error = false;
-                            s.auth_error_paused_polling = false;
-                            s.auth_watch_mode = poller::CredentialWatchMode::ActiveSource;
-                            s.auth_watch_snapshot.clear();
-                            s.session_text = "...".to_string();
-                            s.weekly_text = "...".to_string();
-                            s.retry_count = s.retry_count.saturating_add(1);
-                            let backoff = RETRY_BASE_MS
-                                .saturating_mul(1u32.checked_shl(s.retry_count - 1).unwrap_or(u32::MAX));
-                            let retry_ms = backoff.min(s.poll_interval_ms);
-                            unsafe {
-                                let _ = KillTimer(hwnd, TIMER_RESET_POLL);
-                                SetTimer(hwnd, TIMER_POLL, retry_ms, None);
-                            }
+                        s.force_notify_auth_error = false;
+                        s.auth_error_paused_polling = true;
+                        s.auth_watch_mode = watch_mode;
+                        s.auth_watch_snapshot = watch_snapshot;
+                        s.session_text = "⚠".to_string();
+                        s.weekly_text = "⚠".to_string();
+                        s.retry_count = s.retry_count.saturating_add(1);
+                        unsafe {
+                            let _ = KillTimer(hwnd, TIMER_POLL);
+                            let _ = KillTimer(hwnd, TIMER_RESET_POLL);
+                            let _ = KillTimer(hwnd, TIMER_COUNTDOWN);
+                            SetTimer(hwnd, TIMER_POLL, s.poll_interval_ms, None);
+                        }
+                    }
+                    _ => {
+                        // Transient network / credential-missing errors: exponential backoff.
+                        s.force_notify_auth_error = false;
+                        s.auth_error_paused_polling = false;
+                        s.auth_watch_mode = poller::CredentialWatchMode::ActiveSource;
+                        s.auth_watch_snapshot.clear();
+                        s.session_text = "...".to_string();
+                        s.weekly_text = "...".to_string();
+                        s.retry_count = s.retry_count.saturating_add(1);
+                        let backoff = RETRY_BASE_MS.saturating_mul(
+                            1u32
+                                .checked_shl(s.retry_count - 1)
+                                .unwrap_or(u32::MAX),
+                        );
+                        let retry_ms = backoff.min(s.poll_interval_ms);
+                        unsafe {
+                            let _ = KillTimer(hwnd, TIMER_RESET_POLL);
+                            SetTimer(hwnd, TIMER_POLL, retry_ms, None);
                         }
                     }
                 }
-                should_notify
+            }
+            should_notify
+        };
+
+        if notify_auth_error {
+            let strings = {
+                let state = lock_state();
+                state.as_ref().map(|s| s.language.strings())
             };
-
-            if notify_auth_error {
-                let strings = {
-                    let state = lock_state();
-                    state.as_ref().map(|s| s.language.strings())
-                };
-                if let Some(strings) = strings {
-                    tray_icon::notify_balloon(
-                        hwnd,
-                        strings.token_expired_title,
-                        strings.token_expired_body,
-                    );
-                }
+            if let Some(strings) = strings {
+                tray_icon::notify_balloon(
+                    hwnd,
+                    strings.token_expired_title,
+                    strings.token_expired_body,
+                );
             }
+        }
 
-            unsafe {
-                let _ = PostMessageW(hwnd, WM_APP_USAGE_UPDATED, WPARAM(0), LPARAM(0));
-            }
+        unsafe {
+            let _ = PostMessageW(hwnd, WM_APP_USAGE_UPDATED, WPARAM(0), LPARAM(0));
         }
     }
 }
@@ -1378,27 +1479,31 @@ fn schedule_countdown_timer() {
         return;
     }
 
-    let data = match &s.data {
-        Some(d) => d,
-        None => return,
-    };
-
     // If a reset time has passed, poll every 5s to pick up fresh data
-    if poller::is_past_reset(data) {
+    if s.data
+        .as_ref()
+        .map_or(false, |data| poller::is_past_reset(data))
+        || s.codex_data
+            .as_ref()
+            .map_or(false, |data| poller::is_past_reset(data))
+    {
         unsafe {
             SetTimer(hwnd, TIMER_RESET_POLL, 5_000, None);
         }
     }
 
-    let session_delay = poller::time_until_display_change(data.session.resets_at);
-    let weekly_delay = poller::time_until_display_change(data.weekly.resets_at);
-
-    let min_delay = match (session_delay, weekly_delay) {
-        (Some(a), Some(b)) => Some(a.min(b)),
-        (Some(a), None) => Some(a),
-        (None, Some(b)) => Some(b),
-        (None, None) => None,
-    };
+    let mut min_delay: Option<Duration> = None;
+    for data in [&s.data, &s.codex_data].into_iter().flatten() {
+        for delay in [
+            poller::time_until_display_change(data.session.resets_at),
+            poller::time_until_display_change(data.weekly.resets_at),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            min_delay = Some(min_delay.map_or(delay, |current| current.min(delay)));
+        }
+    }
 
     let ms = min_delay
         .unwrap_or(Duration::from_secs(60))
@@ -2238,7 +2343,18 @@ fn show_context_menu(hwnd: HWND) {
 
 /// Paint for non-embedded fallback (normal WM_PAINT path)
 fn paint(hdc: HDC, hwnd: HWND) {
-    let (is_dark, strings, session_pct, session_text, weekly_pct, weekly_text) = {
+    let (
+        is_dark,
+        strings,
+        session_pct,
+        session_text,
+        weekly_pct,
+        weekly_text,
+        codex_session_pct,
+        codex_session_text,
+        codex_weekly_pct,
+        codex_weekly_text,
+    ) = {
         let state = lock_state();
         match state.as_ref() {
             Some(s) => (
@@ -2248,12 +2364,17 @@ fn paint(hdc: HDC, hwnd: HWND) {
                 s.session_text.clone(),
                 s.weekly_percent,
                 s.weekly_text.clone(),
+                s.codex_session_percent,
+                s.codex_session_text.clone(),
+                s.codex_weekly_percent,
+                s.codex_weekly_text.clone(),
             ),
             None => return,
         }
     };
 
-    let accent = Color::from_hex("#D97757");
+    let claude_accent = Color::from_hex("#D97757");
+    let codex_accent = Color::from_hex("#3BAFDA");
     let track = if is_dark {
         Color::from_hex("#444444")
     } else {
@@ -2291,11 +2412,16 @@ fn paint(hdc: HDC, hwnd: HWND) {
             is_dark,
             &bg_color,
             &text_color,
-            &accent,
+            &codex_accent,
+            &claude_accent,
             &track,
             strings,
+            codex_session_pct,
+            &codex_session_text,
             session_pct,
             &session_text,
+            codex_weekly_pct,
+            &codex_weekly_text,
             weekly_pct,
             &weekly_text,
         );
@@ -2313,9 +2439,12 @@ fn draw_row(
     x: i32,
     y: i32,
     label: &str,
-    percent: f64,
-    text: &str,
-    accent: &Color,
+    codex_percent: f64,
+    codex_text: &str,
+    claude_percent: f64,
+    claude_text: &str,
+    codex_accent: &Color,
+    claude_accent: &Color,
     track: &Color,
 ) {
     let seg_w = sc(SEGMENT_W);
@@ -2339,12 +2468,70 @@ fn draw_row(
         );
 
         let bar_x = x + sc(LABEL_WIDTH) + sc(LABEL_RIGHT_MARGIN);
-        let percent_clamped = percent.clamp(0.0, 100.0);
+        draw_segments(
+            hdc,
+            bar_x,
+            y,
+            codex_percent,
+            codex_accent,
+            track,
+            seg_w,
+            seg_h,
+            seg_gap,
+            corner_r,
+        );
+        let claude_bar_x = bar_x + provider_bar_width() + sc(PROVIDER_BAR_GAP);
+        draw_segments(
+            hdc,
+            claude_bar_x,
+            y,
+            claude_percent,
+            claude_accent,
+            track,
+            seg_w,
+            seg_h,
+            seg_gap,
+            corner_r,
+        );
 
-        for i in 0..SEGMENT_COUNT {
-            let seg_x = bar_x + i * (seg_w + seg_gap);
-            let seg_start = (i as f64) * 10.0;
-            let seg_end = seg_start + 10.0;
+        let text_x = claude_bar_x + provider_bar_width() + sc(BAR_RIGHT_MARGIN);
+        let text = compact_dual_text(codex_text, claude_text);
+        let mut text_wide: Vec<u16> = text.encode_utf16().collect();
+        let mut text_rect = RECT {
+            left: text_x,
+            top: y,
+            right: text_x + sc(TEXT_WIDTH),
+            bottom: y + seg_h,
+        };
+        let _ = DrawTextW(
+            hdc,
+            &mut text_wide,
+            &mut text_rect,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+        );
+    }
+}
+
+fn draw_segments(
+    hdc: HDC,
+    x: i32,
+    y: i32,
+    percent: f64,
+    accent: &Color,
+    track: &Color,
+    seg_w: i32,
+    seg_h: i32,
+    seg_gap: i32,
+    corner_r: i32,
+) {
+    let percent_clamped = percent.clamp(0.0, 100.0);
+    let segment_span = 100.0 / PROVIDER_SEGMENT_COUNT as f64;
+
+    unsafe {
+        for i in 0..PROVIDER_SEGMENT_COUNT {
+            let seg_x = x + i * (seg_w + seg_gap);
+            let seg_start = (i as f64) * segment_span;
+            let seg_end = seg_start + segment_span;
 
             let seg_rect = RECT {
                 left: seg_x,
@@ -2359,7 +2546,7 @@ fn draw_row(
                 draw_rounded_rect(hdc, &seg_rect, track, corner_r);
             } else {
                 draw_rounded_rect(hdc, &seg_rect, track, corner_r);
-                let fraction = (percent_clamped - seg_start) / 10.0;
+                let fraction = (percent_clamped - seg_start) / segment_span;
                 let fill_width = (seg_w as f64 * fraction) as i32;
                 if fill_width > 0 {
                     let fill_rect = RECT {
@@ -2385,22 +2572,19 @@ fn draw_row(
                 }
             }
         }
-
-        let text_x = bar_x + SEGMENT_COUNT * (seg_w + seg_gap) - seg_gap + sc(BAR_RIGHT_MARGIN);
-        let mut text_wide: Vec<u16> = text.encode_utf16().collect();
-        let mut text_rect = RECT {
-            left: text_x,
-            top: y,
-            right: text_x + sc(TEXT_WIDTH),
-            bottom: y + seg_h,
-        };
-        let _ = DrawTextW(
-            hdc,
-            &mut text_wide,
-            &mut text_rect,
-            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
-        );
     }
+}
+
+fn compact_dual_text(codex_text: &str, claude_text: &str) -> String {
+    format!(
+        "C{} A{}",
+        compact_percent(codex_text),
+        compact_percent(claude_text)
+    )
+}
+
+fn compact_percent(text: &str) -> &str {
+    text.split_whitespace().next().unwrap_or("--")
 }
 
 fn draw_rounded_rect(hdc: HDC, rect: &RECT, color: &Color, radius: i32) {

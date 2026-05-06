@@ -11,6 +11,9 @@ use crate::models::{UsageData, UsageSection};
 
 const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 const MESSAGES_URL: &str = "https://api.anthropic.com/v1/messages";
+const CODEX_USAGE_URL: &str = "https://chatgpt.com/backend-api/codex/usage";
+const CODEX_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
+const CODEX_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 const MODEL_FALLBACK_CHAIN: &[&str] = &["claude-3-haiku-20240307", "claude-haiku-4-5-20251001"];
@@ -43,6 +46,40 @@ struct UsageBucket {
     resets_at: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct CodexAuth {
+    tokens: Option<CodexTokens>,
+}
+
+#[derive(Clone, Deserialize)]
+struct CodexTokens {
+    access_token: Option<String>,
+    refresh_token: Option<String>,
+    account_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct CodexUsageResponse {
+    rate_limit: Option<CodexRateLimit>,
+}
+
+#[derive(Deserialize)]
+struct CodexRateLimit {
+    primary_window: Option<CodexUsageBucket>,
+    secondary_window: Option<CodexUsageBucket>,
+}
+
+#[derive(Deserialize)]
+struct CodexUsageBucket {
+    used_percent: f64,
+    reset_at: Option<i64>,
+}
+
+#[derive(Deserialize)]
+struct CodexRefreshResponse {
+    access_token: String,
+}
+
 pub fn poll() -> Result<UsageData, PollError> {
     let creds = match read_first_credentials() {
         Some(c) => c,
@@ -55,6 +92,18 @@ pub fn poll() -> Result<UsageData, PollError> {
     let creds = refresh_or_fallback(creds)?;
 
     fetch_usage_with_fallback(&creds.access_token)
+}
+
+pub fn poll_codex() -> Result<UsageData, PollError> {
+    let tokens = match read_first_codex_tokens() {
+        Some(tokens) => tokens,
+        None => {
+            diagnose::log("codex poll failed: no Codex credentials found");
+            return Err(PollError::NoCredentials);
+        }
+    };
+
+    fetch_codex_usage(&tokens)
 }
 
 fn refresh_or_fallback(mut creds: Credentials) -> Result<Credentials, PollError> {
@@ -486,6 +535,105 @@ fn parse_rate_limit_headers(response: &ureq::Response) -> UsageData {
     data
 }
 
+fn fetch_codex_usage(tokens: &CodexTokens) -> Result<UsageData, PollError> {
+    let access_token = tokens
+        .access_token
+        .as_deref()
+        .ok_or(PollError::AuthRequired)?;
+
+    match try_codex_usage_endpoint(access_token, tokens.account_id.as_deref()) {
+        Ok(data) => Ok(data),
+        Err(PollError::AuthRequired) => {
+            let refreshed = refresh_codex_access_token(tokens)?;
+            try_codex_usage_endpoint(&refreshed, tokens.account_id.as_deref())
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn try_codex_usage_endpoint(
+    access_token: &str,
+    account_id: Option<&str>,
+) -> Result<UsageData, PollError> {
+    let agent = build_agent()?;
+    let mut request = agent
+        .get(CODEX_USAGE_URL)
+        .set("Authorization", &format!("Bearer {access_token}"))
+        .set("Accept", "application/json")
+        .set(
+            "User-Agent",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) CodexUsageMonitor",
+        );
+
+    if let Some(account_id) = account_id.filter(|value| !value.is_empty()) {
+        request = request.set("chatgpt-account-id", account_id);
+    }
+
+    let resp = match request.call() {
+        Ok(resp) => resp,
+        Err(ureq::Error::Status(code, _)) if code == 401 || code == 403 => {
+            diagnose::log(format!(
+                "codex usage endpoint returned auth error status {code}; refresh required"
+            ));
+            return Err(PollError::AuthRequired);
+        }
+        Err(error) => {
+            diagnose::log(format!("codex usage endpoint request failed: {error}"));
+            return Err(PollError::RequestFailed);
+        }
+    };
+
+    let response: CodexUsageResponse = resp.into_json().map_err(|_| PollError::RequestFailed)?;
+    let mut data = UsageData::default();
+    let rate_limit = response.rate_limit.ok_or(PollError::RequestFailed)?;
+
+    if let Some(bucket) = rate_limit.primary_window {
+        data.session.percentage = bucket.used_percent;
+        data.session.resets_at = unix_to_system_time(bucket.reset_at);
+    }
+
+    if let Some(bucket) = rate_limit.secondary_window {
+        data.weekly.percentage = bucket.used_percent;
+        data.weekly.resets_at = unix_to_system_time(bucket.reset_at);
+    }
+
+    Ok(data)
+}
+
+fn refresh_codex_access_token(tokens: &CodexTokens) -> Result<String, PollError> {
+    let refresh_token = tokens
+        .refresh_token
+        .as_deref()
+        .ok_or(PollError::TokenExpired)?;
+    let agent = build_agent()?;
+    let body = format!(
+        "grant_type=refresh_token&refresh_token={}&client_id={}",
+        url_encode(refresh_token),
+        url_encode(CODEX_CLIENT_ID)
+    );
+
+    let resp = match agent
+        .post(CODEX_TOKEN_URL)
+        .set("Content-Type", "application/x-www-form-urlencoded")
+        .send_string(&body)
+    {
+        Ok(resp) => resp,
+        Err(ureq::Error::Status(code, _)) if code == 401 || code == 403 => {
+            diagnose::log(format!(
+                "codex token refresh returned auth error status {code}; re-login required"
+            ));
+            return Err(PollError::TokenExpired);
+        }
+        Err(error) => {
+            diagnose::log(format!("codex token refresh request failed: {error}"));
+            return Err(PollError::RequestFailed);
+        }
+    };
+
+    let response: CodexRefreshResponse = resp.into_json().map_err(|_| PollError::RequestFailed)?;
+    Ok(response.access_token)
+}
+
 fn get_header_f64(response: &ureq::Response, name: &str) -> f64 {
     response
         .header(name)
@@ -503,6 +651,19 @@ fn unix_to_system_time(unix_secs: Option<i64>) -> Option<SystemTime> {
         return None;
     }
     Some(UNIX_EPOCH + Duration::from_secs(secs as u64))
+}
+
+fn url_encode(value: &str) -> String {
+    let mut encoded = String::new();
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                encoded.push(byte as char)
+            }
+            _ => encoded.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    encoded
 }
 
 struct Credentials {
@@ -531,6 +692,20 @@ fn read_first_credentials() -> Option<Credentials> {
     None
 }
 
+fn read_first_codex_tokens() -> Option<CodexTokens> {
+    if let Some(tokens) = read_windows_codex_tokens() {
+        return Some(tokens);
+    }
+
+    for distro in list_wsl_distros() {
+        if let Some(tokens) = read_wsl_codex_tokens(&distro) {
+            return Some(tokens);
+        }
+    }
+
+    None
+}
+
 fn read_windows_credentials() -> Option<Credentials> {
     let CredentialSource::Windows(cred_path) = windows_credential_source()? else {
         return None;
@@ -548,6 +723,26 @@ fn read_windows_credentials() -> Option<Credentials> {
         }
     };
     parse_credentials(&content, CredentialSource::Windows(cred_path))
+}
+
+fn read_windows_codex_tokens() -> Option<CodexTokens> {
+    let profile = std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .ok()?;
+    let path = PathBuf::from(profile).join(".codex").join("auth.json");
+    let content = match std::fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(error) => {
+            if diagnose::is_enabled() {
+                diagnose::log_error(
+                    &format!("unable to read Windows Codex credentials at {}", path.display()),
+                    error,
+                );
+            }
+            return None;
+        }
+    };
+    parse_codex_tokens(&content)
 }
 
 fn read_credentials_from_source(source: &CredentialSource) -> Option<Credentials> {
@@ -592,6 +787,33 @@ fn read_wsl_credentials(distro: &str) -> Option<Credentials> {
     )
 }
 
+fn read_wsl_codex_tokens(distro: &str) -> Option<CodexTokens> {
+    let output = run_with_timeout(
+        Command::new("wsl.exe")
+            .arg("-d")
+            .arg(distro)
+            .arg("--")
+            .arg("sh")
+            .arg("-lc")
+            .arg("cat ~/.codex/auth.json")
+            .creation_flags(CREATE_NO_WINDOW)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null()),
+        Duration::from_secs(5),
+    )?;
+
+    if !output.status.success() {
+        diagnose::log(format!(
+            "WSL Codex credentials probe failed for distro {distro} with status {}",
+            output.status
+        ));
+        return None;
+    }
+
+    let content = String::from_utf8(output.stdout).ok()?;
+    parse_codex_tokens(&content)
+}
+
 fn parse_credentials(content: &str, source: CredentialSource) -> Option<Credentials> {
     let json: serde_json::Value = serde_json::from_str(content).ok()?;
 
@@ -607,6 +829,13 @@ fn parse_credentials(content: &str, source: CredentialSource) -> Option<Credenti
         expires_at,
         source,
     })
+}
+
+fn parse_codex_tokens(content: &str) -> Option<CodexTokens> {
+    let auth: CodexAuth = serde_json::from_str(content).ok()?;
+    let tokens = auth.tokens?;
+    tokens.access_token.as_ref()?;
+    Some(tokens)
 }
 
 fn read_next_credentials_after(source: &CredentialSource) -> Option<Credentials> {

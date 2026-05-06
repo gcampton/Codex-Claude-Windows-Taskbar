@@ -1,18 +1,18 @@
 [package]
-name = "claude-code-usage-monitor"
+name = "codex-claude-windows-taskbar"
 version = "1.3.9"
 edition = "2021"
 license = "MIT"
-description = "Claude Code Usage Monitor"
+description = "Codex and Claude usage monitor for the Windows taskbar"
 homepage = "https://codezeno.com.au"
-repository = "https://github.com/CodeZeno/Claude-Code-Usage-Monitor"
+repository = "https://github.com/puney/Codex-Claude-Windows-Taskbar"
 
 [package.metadata.winres]
 CompanyName = "Code Zeno Pty Ltd"
-ProductName = "Claude Code Usage Monitor"
-FileDescription = "Claude Code Usage Monitor"
-OriginalFilename = "claude-code-usage-monitor.exe"
-InternalName = "ClaudeCodeUsageMonitor"
+ProductName = "Codex Claude Windows Taskbar"
+FileDescription = "Codex and Claude usage monitor for the Windows taskbar"
+OriginalFilename = "codex-claude-windows-taskbar.exe"
+InternalName = "CodexClaudeWindowsTaskbar"
 Comments = "https://codezeno.com.au"
 LegalCopyright = "Copyright (C) 2026 Code Zeno Pty Ltd"
 
