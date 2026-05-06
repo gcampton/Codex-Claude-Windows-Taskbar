@@ -693,11 +693,11 @@ fn read_first_credentials() -> Option<Credentials> {
 }
 
 fn read_first_codex_tokens() -> Option<CodexTokens> {
-    if let Some(tokens) = read_windows_codex_tokens() {
+    if let Some(tokens) = read_wsl_unc_codex_tokens() {
         return Some(tokens);
     }
 
-    if let Some(tokens) = read_wsl_unc_codex_tokens() {
+    if let Some(tokens) = read_windows_codex_tokens() {
         return Some(tokens);
     }
 
