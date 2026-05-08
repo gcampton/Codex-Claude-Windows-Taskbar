@@ -53,19 +53,13 @@ target\release\codex-claude-windows-taskbar.exe
 
 ## Use
 
-If installed with WinGet, open a new PowerShell window and run:
+Download the latest executable from the [Releases](https://github.com/gcampton/Codex-Claude-Windows-Taskbar/releases) page, then run it from PowerShell:
 
 ```powershell
-codex-claude-windows-taskbar
+.\codex-claude-windows-taskbar.exe
 ```
 
-If the command is not on `PATH` yet, run the WinGet portable link directly:
-
-```powershell
-& "$env:LOCALAPPDATA\Microsoft\WinGet\Links\codex-claude-windows-taskbar.exe"
-```
-
-If built from source, run the executable:
+If built from source, run:
 
 ```powershell
 .\target\release\codex-claude-windows-taskbar.exe
@@ -82,7 +76,7 @@ Once running, it appears in your taskbar and notification area.
 Run:
 
 ```powershell
-codex-claude-windows-taskbar --diagnose
+.\codex-claude-windows-taskbar.exe --diagnose
 ```
 
 Logs are written to:
