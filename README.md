@@ -53,7 +53,19 @@ target\release\codex-claude-windows-taskbar.exe
 
 ## Use
 
-Run the executable:
+If installed with WinGet, open a new PowerShell window and run:
+
+```powershell
+codex-claude-windows-taskbar
+```
+
+If the command is not on `PATH` yet, run the WinGet portable link directly:
+
+```powershell
+& "$env:LOCALAPPDATA\Microsoft\WinGet\Links\codex-claude-windows-taskbar.exe"
+```
+
+If built from source, run the executable:
 
 ```powershell
 .\target\release\codex-claude-windows-taskbar.exe
