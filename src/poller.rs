@@ -11,7 +11,7 @@ use crate::models::{UsageData, UsageSection};
 
 const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 const MESSAGES_URL: &str = "https://api.anthropic.com/v1/messages";
-const CODEX_USAGE_URL: &str = "https://chatgpt.com/backend-api/codex/usage";
+const CODEX_USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
 const CODEX_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
 const CODEX_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const CREATE_NO_WINDOW: u32 = 0x08000000;
@@ -95,19 +95,21 @@ pub fn poll() -> Result<UsageData, PollError> {
 }
 
 pub fn poll_codex() -> Result<UsageData, PollError> {
-    if let Ok(data) = fetch_wsl_codex_usage() {
-        return Ok(data);
-    }
-
-    let tokens = match read_first_codex_tokens() {
-        Some(tokens) => tokens,
-        None => {
-            diagnose::log("codex poll failed: no Codex credentials found");
-            return Err(PollError::NoCredentials);
-        }
+    match read_first_codex_tokens() {
+        Some(tokens) => match fetch_codex_usage(&tokens) {
+            Ok(data) => return Ok(data),
+            Err(error) => diagnose::log(format!("Codex direct usage fetch failed: {error:?}")),
+        },
+        None => diagnose::log("codex direct usage fetch skipped: no Codex credentials found"),
     };
 
-    fetch_codex_usage(&tokens)
+    match fetch_wsl_codex_usage() {
+        Ok(data) => Ok(data),
+        Err(error) => {
+            diagnose::log(format!("Codex WSL usage fetch unavailable: {error:?}"));
+            Err(error)
+        }
+    }
 }
 
 fn refresh_or_fallback(mut creds: Credentials) -> Result<Credentials, PollError> {
@@ -609,18 +611,29 @@ fn codex_usage_response_to_data(response: CodexUsageResponse) -> Result<UsageDat
 }
 
 fn fetch_wsl_codex_usage() -> Result<UsageData, PollError> {
-    for distro in list_wsl_distros() {
-        let Some(data) = fetch_wsl_codex_usage_for_distro(&distro) else {
-            continue;
-        };
-        diagnose::log(format!("read Codex usage via WSL Python in distro {distro}"));
-        return Ok(data);
+    let distros = list_wsl_distros();
+    diagnose::log(format!("Codex WSL usage probe distros={distros:?}"));
+
+    if distros.is_empty() {
+        return Err(PollError::NoCredentials);
+    }
+
+    for distro in distros {
+        match fetch_wsl_codex_usage_for_distro(&distro) {
+            Ok(data) => {
+                diagnose::log(format!("read Codex usage via WSL Python in distro {distro}"));
+                return Ok(data);
+            }
+            Err(error) => diagnose::log(format!(
+                "WSL Codex usage fetch failed for distro {distro}: {error}"
+            )),
+        }
     }
 
     Err(PollError::RequestFailed)
 }
 
-fn fetch_wsl_codex_usage_for_distro(distro: &str) -> Option<UsageData> {
+fn fetch_wsl_codex_usage_for_distro(distro: &str) -> Result<UsageData, String> {
     let script = r#"
 import json
 import pathlib
@@ -641,7 +654,7 @@ account_id = tokens.get("account_id")
 if account_id:
     headers["chatgpt-account-id"] = account_id
 
-req = urllib.request.Request("https://chatgpt.com/backend-api/codex/usage", headers=headers)
+req = urllib.request.Request("https://chatgpt.com/backend-api/wham/usage", headers=headers)
 with urllib.request.urlopen(req, timeout=15) as resp:
     print(resp.read().decode("utf-8"))
 "#;
@@ -658,18 +671,16 @@ with urllib.request.urlopen(req, timeout=15) as resp:
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null()),
         Duration::from_secs(20),
-    )?;
+    )
+    .ok_or_else(|| "wsl.exe/python3 timed out or failed to start".to_string())?;
 
     if !output.status.success() {
-        diagnose::log(format!(
-            "WSL Codex usage fetch failed for distro {distro} with status {}",
-            output.status
-        ));
-        return None;
+        return Err(format!("status {}", output.status));
     }
 
-    let response: CodexUsageResponse = serde_json::from_slice(&output.stdout).ok()?;
-    codex_usage_response_to_data(response).ok()
+    let response: CodexUsageResponse = serde_json::from_slice(&output.stdout)
+        .map_err(|error| format!("invalid JSON from WSL Codex usage fetch: {error}"))?;
+    codex_usage_response_to_data(response).map_err(|error| format!("{error:?}"))
 }
 
 fn refresh_codex_access_token(tokens: &CodexTokens) -> Result<String, PollError> {
@@ -765,11 +776,11 @@ fn read_first_credentials() -> Option<Credentials> {
 }
 
 fn read_first_codex_tokens() -> Option<CodexTokens> {
-    if let Some(tokens) = read_wsl_unc_codex_tokens() {
+    if let Some(tokens) = read_windows_codex_tokens() {
         return Some(tokens);
     }
 
-    if let Some(tokens) = read_windows_codex_tokens() {
+    if let Some(tokens) = read_wsl_unc_codex_tokens() {
         return Some(tokens);
     }
 
