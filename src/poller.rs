@@ -1137,15 +1137,35 @@ fn is_leap(y: u64) -> bool {
     (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
 }
 
-/// Format a usage section as "X% · Yh" style text
+/// Format a reset window as "X% · Yh" style text, where X is elapsed window time.
 pub fn format_line(section: &UsageSection, strings: Strings) -> String {
-    let pct = format!("{:.0}%", section.percentage);
+    let pct = format!("{:.0}%", reset_window_elapsed_percent(section.resets_at));
     let cd = format_countdown(section.resets_at, strings);
     if cd.is_empty() {
         pct
     } else {
         format!("{pct} \u{00b7} {cd}")
     }
+}
+
+fn reset_window_elapsed_percent(resets_at: Option<SystemTime>) -> f64 {
+    let Some(reset) = resets_at else {
+        return 0.0;
+    };
+
+    let Ok(remaining) = reset.duration_since(SystemTime::now()) else {
+        return 100.0;
+    };
+
+    let window_secs = if remaining <= Duration::from_secs(5 * 60 * 60) {
+        5 * 60 * 60
+    } else {
+        7 * 24 * 60 * 60
+    };
+
+    let remaining_secs = remaining.as_secs().min(window_secs);
+    let elapsed_secs = window_secs.saturating_sub(remaining_secs);
+    (elapsed_secs as f64 / window_secs as f64 * 100.0).clamp(0.0, 100.0)
 }
 
 fn format_countdown(resets_at: Option<SystemTime>, strings: Strings) -> String {
